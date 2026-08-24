@@ -179,3 +179,11 @@ Runtime
 - Double Capsule Memory（状態機械）
 - RoleplayEngine（Runtime / Observer / Gate）
 - η連動の Control Prompt 強度変調（Runtimeのみの差分）
+
+## License
+
+PolyForm Noncommercial License 1.0.0
+
+- 個人の研究・実験・学習・趣味利用：OK
+- 商用利用：禁止
+- 詳細は `LICENSE` を参照

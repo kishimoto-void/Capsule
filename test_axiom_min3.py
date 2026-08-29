@@ -30,10 +30,16 @@ class TestAxiomMin3(unittest.TestCase):
     def test_delta_and_is_max_limit(self):
         self.cap.write_delta(self.g1, "課題", "val1")
         self.cap.write_delta(self.g1, "改善点", "val2")
-        lines = self.cap.is_lines({"project": "AXIOM"})
+        self.cap.write_delta(self.g1, "結論", "val3")
+        self.cap.write_delta(self.g1, "立場", "val4")
+        lines = self.cap.is_lines({"project": "AXIOM", "topic": "test"})
         self.assertEqual(len(lines), 3)
-        self.assertEqual(lines, ["env=prod", "課題=val1", "改善点=val2"])
-        self.assertFalse(any(x.startswith("sys=") for x in lines))
+        self.assertEqual(lines, ["改善点=val2", "結論=val3", "立場=val4"])
+        self.assertFalse(any(x.startswith("sys=") or x.startswith("env=") for x in lines))
+        text = self.cap.render("質問", {"project": "AXIOM", "topic": "test"})
+        self.assertIn("sys=AXIOM", text)
+        self.assertIn("[β facts]", text)
+        self.assertNotIn("課題=val1", "\n".join(lines))
 
     def test_eta_high_threshold(self):
         self.assertFalse(self.cap.eta.high())
@@ -47,10 +53,12 @@ class TestAxiomMin3(unittest.TestCase):
         self.assertEqual(gate(eta, identity=0.5, human=False), Write.DELTA)
 
     def test_render_bind_switch(self):
-        filt = {"project": "AXIOM"}
-        self.assertIn("βに従って短く", self.cap.render("質問", filt))
+        filt = {"time_label": "2026-08", "project": "AXIOM", "topic": "test"}
+        text = self.cap.render("質問", filt)
+        self.assertIn("基準に従って短く", text)
+        self.assertIn("2026-08 / AXIOM / test", text)
         self.cap.eta.step(tone=0.1, identity=0.1, values=0.1)
-        self.assertIn("偏差が大きい。βへ戻せ", self.cap.render("質問", filt))
+        self.assertIn("偏差が大きい。基準へ戻せ", self.cap.render("質問", filt))
 
     def test_gamma_scopes_delta_from_is(self):
         other = Gamma(project="AXIOM", topic="chat")
@@ -63,6 +71,7 @@ class TestAxiomMin3(unittest.TestCase):
     def test_closed_words_and_lookup(self):
         g2 = Gamma(project="OTHER", topic="y")
         self.assertIsNone(self.cap.write_delta(self.g1, "好き", "弾幕"))
+        self.assertEqual(self.cap.last_write, Write.UNKNOWN_WORD)
         self.cap.write_delta(self.g1, "issue", "混濁")
         self.cap.write_delta(g2, "課題", "別件")
         self.assertEqual(len(self.cap.lookup("課題")), 2)
@@ -70,6 +79,30 @@ class TestAxiomMin3(unittest.TestCase):
         self.assertIsNone(self.cap.write_delta(self.g1, "好き", "弾幕", human=True))
         self.cap.adopt_word("好き")
         self.assertIsNotNone(self.cap.write_delta(self.g1, "好き", "弾幕"))
+
+    def test_exact_default_does_not_absorb_neighbor(self):
+        near = Gamma(project="AXIOM", topic="test2")
+        self.cap.write_delta(self.g1, "状態", "本筋")
+        self.cap.write_delta(near, "状態", "似たtopic")
+        lines = self.cap.is_lines({"project": "AXIOM", "topic": "test"})
+        self.assertEqual(lines, ["状態=本筋"])
+        leaked = self.cap.is_lines({"project": "AXIOM", "topic": "test"}, exact=False)
+        self.assertTrue(any("似たtopic" in x for x in leaked))
+
+    def test_gate_wired_to_write(self):
+        blocked = self.cap.write_delta(self.g1, "状態", "低identity", identity=0.05)
+        self.assertIsNone(blocked)
+        self.assertEqual(self.cap.last_write, Write.NONE)
+        self.assertEqual(self.cap.latest({"topic": "test"}, "状態"), None)
+        queued = self.cap.write_delta(self.g1, "状態", "要承認", human=True)
+        self.assertIsNone(queued)
+        self.assertEqual(self.cap.last_write, Write.HUMAN)
+        self.assertEqual(len(self.cap.pending()), 1)
+        self.assertIsNone(self.cap.latest({"topic": "test"}, "状態"))
+        approved = self.cap.approve_pending()
+        self.assertIsNotNone(approved)
+        self.assertEqual(self.cap.latest({"topic": "test"}, "状態").new_value, "要承認")
+        self.assertEqual(self.cap.pending(), [])
 
 if __name__ == "__main__":
     unittest.main()

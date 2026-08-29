@@ -6,6 +6,7 @@ No new layer:
   - latest/is_lines default exact=True
   - write_delta calls gate(). NONE drops. HUMAN queues
   - render prints the full γ address from the filter
+  - latest is append order. η does not decide writes
 """
 from __future__ import annotations
 import hashlib, json, time
@@ -119,6 +120,8 @@ class Write:
     NONE = "none"; DELTA = "delta"; HUMAN = "needs_human"; UNKNOWN_WORD = "unknown_word"
 
 def gate(eta, identity, human):
+    # eta is passed for gate-policy compatibility.
+    # current min3 write policy does not use η; high η only changes bind.
     if identity < 0.20: return Write.NONE
     if human: return Write.HUMAN
     return Write.DELTA
@@ -137,6 +140,7 @@ class Capsule:
     def adopt_word(self, field):
         w = canon_word(field); self._adopted.add(w); return w
     def _index_put(self, g):
+        # coarse bucket only. time is judged later by Gamma.matches.
         k = f"{g.project}::{g.topic}"
         if g not in self._index[k]: self._index[k].append(g)
     def _prepare_address(self, address, grain="month"):
@@ -189,6 +193,7 @@ class Capsule:
                 out.append(g)
         return out
     def latest_at(self, filt, exact=True):
+        # latest = append order on _deltas, not max(timestamp).
         last = {}
         for _, d in self.query_delta(filt, exact=exact):
             last[d.field] = d

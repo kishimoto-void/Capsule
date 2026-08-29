@@ -104,5 +104,62 @@ class TestAxiomMin3(unittest.TestCase):
         self.assertEqual(self.cap.latest({"topic": "test"}, "状態").new_value, "要承認")
         self.assertEqual(self.cap.pending(), [])
 
+    def test_time_does_not_cross_contaminate(self):
+        jul = Gamma(time_label="2026-07-15", project="AXIOM", topic="memory")
+        aug = Gamma(time_label="2026-08-15", project="AXIOM", topic="memory")
+        self.cap.write_delta(jul, "状態", "7月")
+        self.cap.write_delta(aug, "状態", "8月")
+        filt_jul = {"time_label": "2026-07", "project": "AXIOM", "topic": "memory"}
+        filt_aug = {"time_label": "2026-08", "project": "AXIOM", "topic": "memory"}
+        self.assertEqual(self.cap.is_lines(filt_jul), ["状態=7月"])
+        self.assertEqual(self.cap.is_lines(filt_aug), ["状態=8月"])
+        times = sorted(g.time_label for g in self.cap.query_gamma({"project": "AXIOM", "topic": "memory"}))
+        self.assertEqual(times, ["2026-07", "2026-08"])
+
+    def test_topic_does_not_cross_contaminate(self):
+        mas = Gamma(project="AXIOM", topic="MAS")
+        cap = Gamma(project="AXIOM", topic="Capsule")
+        self.cap.write_delta(mas, "結論", "別件")
+        self.cap.write_delta(cap, "結論", "本筋")
+        self.assertEqual(self.cap.latest({"project": "AXIOM", "topic": "Capsule"}, "結論").new_value, "本筋")
+        self.assertEqual(self.cap.is_lines({"project": "AXIOM", "topic": "Capsule"}), ["結論=本筋"])
+        self.assertFalse(any("別件" in x for x in self.cap.is_lines({"project": "AXIOM", "topic": "Capsule"})))
+
+    def test_human_queue_invisible_until_approve(self):
+        queued = self.cap.write_delta(self.g1, "結論", "未承認", human=True)
+        self.assertIsNone(queued)
+        self.assertEqual(self.cap.query_delta({"project": "AXIOM", "topic": "test"}), [])
+        self.assertEqual(self.cap.is_lines({"project": "AXIOM", "topic": "test"}), [])
+        self.assertEqual(len(self.cap.pending()), 1)
+        self.cap.approve_pending()
+        found = self.cap.query_delta({"project": "AXIOM", "topic": "test"})
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0][1].new_value, "未承認")
+
+    def test_none_drops_from_store_and_pending(self):
+        before = list(self.cap._deltas)
+        dropped = self.cap.write_delta(self.g1, "立場", "捨てる", identity=0.19)
+        self.assertIsNone(dropped)
+        self.assertEqual(self.cap.last_write, Write.NONE)
+        self.assertEqual(self.cap._deltas, before)
+        self.assertEqual(self.cap.pending(), [])
+        self.assertEqual(self.cap.query_delta({"topic": "test"}), [])
+
+    def test_fact_tamper_stops_render(self):
+        frozen = self.cap.inner.hash_a
+        self.cap.inner.facts = (BetaFact("K-9", "sys", "HACK"),)
+        self.assertEqual(self.cap.inner.hash_a, frozen)
+        self.assertFalse(self.cap.inner.intact())
+        text = self.cap.render("続けて", {"project": "AXIOM", "topic": "test"})
+        self.assertIn("生成するな", text)
+
+    def test_high_eta_does_not_block_delta_write(self):
+        self.cap.eta.step(tone=0.0, identity=0.0, values=0.0)
+        self.assertTrue(self.cap.eta.high())
+        written = self.cap.write_delta(self.g1, "状態", "高ηでも書く")
+        self.assertIsNotNone(written)
+        self.assertEqual(self.cap.last_write, Write.DELTA)
+        self.assertIn("高ηでも書く", self.cap.is_lines({"project": "AXIOM", "topic": "test"})[0])
+
 if __name__ == "__main__":
     unittest.main()

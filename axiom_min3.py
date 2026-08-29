@@ -4,8 +4,9 @@
 No new layer:
   - IS is Δ only. facts stay inside αβ
   - latest/is_lines default exact=True
+  - exact=True equals supplied filter keys only; missing γ axes are wildcards
   - write_delta calls gate(). NONE drops. HUMAN queues
-  - render prints the full γ address from the filter
+  - render prints supplied γ axes from the filter
   - latest is append order. η does not decide writes
 """
 from __future__ import annotations
@@ -34,6 +35,7 @@ def coarse_time(label: str, grain: str = "month") -> str:
     return s[:7] if len(s) >= 7 else s
 
 def gamma_line(filt: dict) -> str:
+    # shows supplied dimensions only. missing axes stay blank, not inferred.
     parts = [filt.get(k, "") for k in ("time_label", "project", "topic")]
     return " / ".join(p for p in parts if p) or "(unscoped)"
 
@@ -77,6 +79,8 @@ class Gamma:
     project: str = ""
     topic: str = ""
     def matches(self, filt, exact=True):
+        # exact = equality on supplied keys only. unspecified γ axes stay wildcards.
+        # exact does not mean "all three axes must be present".
         for k, v in filt.items():
             if not hasattr(self, k): return False
             val = getattr(self, k)

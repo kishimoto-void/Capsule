@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """min3 単体検証。γ は time+project+topic。"""
 import unittest
-from axiom_min3 import Alpha, Beta, BetaFact, Capsule, Eta, Gamma, Inner, Write, gate
+from axiom_min3 import Alpha, Beta, BetaFact, Capsule, Eta, Gamma, Inner, Write, gate, parse_packet
 
 class TestAxiomMin3(unittest.TestCase):
     def setUp(self):
@@ -32,6 +32,11 @@ class TestAxiomMin3(unittest.TestCase):
         self.cap.write_delta(self.g1, "改善点", "val2")
         self.cap.write_delta(self.g1, "結論", "val3")
         self.cap.write_delta(self.g1, "立場", "val4")
+        self.assertEqual(self.cap.is_lines({"project": "AXIOM", "topic": "test"}), [])
+        self.cap.write_is(self.g1, "課題", "val1")
+        self.cap.write_is(self.g1, "改善点", "val2")
+        self.cap.write_is(self.g1, "結論", "val3")
+        self.cap.write_is(self.g1, "立場", "val4")
         lines = self.cap.is_lines({"project": "AXIOM", "topic": "test"})
         self.assertEqual(len(lines), 3)
         self.assertEqual(lines, ["改善点=val2", "結論=val3", "立場=val4"])
@@ -63,6 +68,7 @@ class TestAxiomMin3(unittest.TestCase):
     def test_gamma_scopes_delta_from_is(self):
         other = Gamma(project="AXIOM", topic="chat")
         self.cap.write_delta(self.g1, "状態", "本筋")
+        self.cap.write_is(self.g1, "状態", "本筋")
         self.assertIsNone(self.cap.write_delta(other, "chatter", "雑談"))
         lines = self.cap.is_lines({"project": "AXIOM", "topic": "test"})
         self.assertTrue(any("本筋" in x for x in lines))
@@ -84,6 +90,8 @@ class TestAxiomMin3(unittest.TestCase):
         near = Gamma(project="AXIOM", topic="test2")
         self.cap.write_delta(self.g1, "状態", "本筋")
         self.cap.write_delta(near, "状態", "似たtopic")
+        self.cap.write_is(self.g1, "状態", "本筋")
+        self.cap.write_is(near, "状態", "似たtopic")
         lines = self.cap.is_lines({"project": "AXIOM", "topic": "test"})
         self.assertEqual(lines, ["状態=本筋"])
         leaked = self.cap.is_lines({"project": "AXIOM", "topic": "test"}, exact=False)
@@ -109,6 +117,8 @@ class TestAxiomMin3(unittest.TestCase):
         aug = Gamma(time_label="2026-08-15", project="AXIOM", topic="memory")
         self.cap.write_delta(jul, "状態", "7月")
         self.cap.write_delta(aug, "状態", "8月")
+        self.cap.write_is(jul, "状態", "7月")
+        self.cap.write_is(aug, "状態", "8月")
         filt_jul = {"time_label": "2026-07", "project": "AXIOM", "topic": "memory"}
         filt_aug = {"time_label": "2026-08", "project": "AXIOM", "topic": "memory"}
         self.assertEqual(self.cap.is_lines(filt_jul), ["状態=7月"])
@@ -121,6 +131,8 @@ class TestAxiomMin3(unittest.TestCase):
         cap = Gamma(project="AXIOM", topic="Capsule")
         self.cap.write_delta(mas, "結論", "別件")
         self.cap.write_delta(cap, "結論", "本筋")
+        self.cap.write_is(mas, "結論", "別件")
+        self.cap.write_is(cap, "結論", "本筋")
         self.assertEqual(self.cap.latest({"project": "AXIOM", "topic": "Capsule"}, "結論").new_value, "本筋")
         self.assertEqual(self.cap.is_lines({"project": "AXIOM", "topic": "Capsule"}), ["結論=本筋"])
         self.assertFalse(any("別件" in x for x in self.cap.is_lines({"project": "AXIOM", "topic": "Capsule"})))
@@ -158,6 +170,8 @@ class TestAxiomMin3(unittest.TestCase):
         b = Gamma(time_label="2026-08", project="AXIOM", topic="MAS")
         self.cap.write_delta(a, "状態", "本筋")
         self.cap.write_delta(b, "状態", "別件")
+        self.cap.write_is(a, "状態", "本筋")
+        self.cap.write_is(b, "状態", "別件")
         values = [d.new_value for _, d in self.cap.query_delta({"project": "AXIOM"}, exact=True)]
         self.assertEqual(sorted(values), ["別件", "本筋"])
         self.assertEqual(self.cap.is_lines({"project": "AXIOM", "topic": "Capsule"}, exact=True), ["状態=本筋"])
@@ -175,7 +189,48 @@ class TestAxiomMin3(unittest.TestCase):
         written = self.cap.write_delta(self.g1, "状態", "高ηでも書く")
         self.assertIsNotNone(written)
         self.assertEqual(self.cap.last_write, Write.DELTA)
+        self.assertEqual(self.cap.is_lines({"project": "AXIOM", "topic": "test"}), [])
+        self.cap.write_is(self.g1, "状態", "高ηでも書く")
         self.assertIn("高ηでも書く", self.cap.is_lines({"project": "AXIOM", "topic": "test"})[0])
+
+    def test_delta_does_not_leak_into_is(self):
+        self.cap.write_delta(self.g1, "状態", "ログだけ")
+        self.assertEqual(self.cap.latest({"topic": "test"}, "状態").new_value, "ログだけ")
+        self.assertEqual(self.cap.is_lines({"project": "AXIOM", "topic": "test"}), [])
+        self.cap.write_is(self.g1, "結論", "採用だけ")
+        self.assertEqual(self.cap.is_lines({"project": "AXIOM", "topic": "test"}), ["結論=採用だけ"])
+        self.assertIsNone(self.cap.latest({"topic": "test"}, "結論"))
+
+    def test_llm_packet_to_indexes(self):
+        raw = (
+            '{"gamma":{"time_label":"2026-08","project":"AXIOM","topic":"Capsule"},'
+            '"delta":[{"field":"状態","new_value":"本筋"}],'
+            '"is":[{"field":"結論","value":"隔離"}]}'
+        )
+        out = self.cap.ingest(raw)
+        self.assertIsNotNone(out)
+        self.assertEqual(out["gamma"].topic, "Capsule")
+        self.assertEqual(len(out["delta"]), 1)
+        self.assertEqual(out["is"], ["結論=隔離"])
+        filt = {"time_label": "2026-08", "project": "AXIOM", "topic": "Capsule"}
+        self.assertEqual(self.cap.latest(filt, "状態").new_value, "本筋")
+        self.assertEqual(self.cap.is_lines(filt), ["結論=隔離"])
+        self.assertFalse(any("本筋" in x for x in self.cap.is_lines(filt)))
+
+    def test_bad_packet_is_dropped(self):
+        self.assertIsNone(parse_packet("続きを書いて"))
+        self.assertIsNone(self.cap.ingest("続きを書いて"))
+        self.assertEqual(self.cap.last_write, Write.BAD_PACKET)
+        self.assertIsNone(self.cap.ingest({"gamma": {"project": "AXIOM"}, "memory": "x"}))
+        self.assertEqual(self.cap._deltas, [])
+
+    def test_human_is_pending_isolated(self):
+        self.assertIsNone(self.cap.write_is(self.g1, "状態", "要承認", human=True))
+        self.assertEqual(self.cap.last_write, Write.HUMAN)
+        self.assertEqual(self.cap.is_lines({"topic": "test"}), [])
+        self.assertEqual(len(self.cap.pending_is()), 1)
+        self.cap.approve_is()
+        self.assertEqual(self.cap.is_lines({"project": "AXIOM", "topic": "test"}), ["状態=要承認"])
 
 if __name__ == "__main__":
     unittest.main()

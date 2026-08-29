@@ -8,6 +8,8 @@ No new layer:
   - write_delta calls gate(). NONE drops. HUMAN queues
   - render prints supplied γ axes from the filter
   - latest is append order. η does not decide writes
+  - LLM writes only via closed packet {gamma, delta, is}
+  - IS is isolated from Δ. write_delta never adopts IS
 """
 from __future__ import annotations
 import hashlib, json, time
@@ -19,6 +21,10 @@ IS_MAX = 3
 ETA_HIGH = 0.35
 WORDS = frozenset({"課題", "改善点", "結論", "立場", "状態"})
 WORD_ALIAS = {"issue": "課題", "improve": "改善点", "improvement": "改善点", "conclusion": "結論", "position": "立場", "status": "状態", "state": "状態"}
+PACKET_KEYS = frozenset({"gamma", "delta", "is"})
+GAMMA_KEYS = frozenset({"time_label", "project", "topic"})
+DELTA_KEYS = frozenset({"field", "new_value", "old_value", "source_id", "reason"})
+IS_KEYS = frozenset({"field", "value"})
 
 def _sha(obj):
     raw = json.dumps(obj, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -121,7 +127,7 @@ class Eta:
         return self.pull >= ETA_HIGH
 
 class Write:
-    NONE = "none"; DELTA = "delta"; HUMAN = "needs_human"; UNKNOWN_WORD = "unknown_word"
+    NONE = "none"; DELTA = "delta"; HUMAN = "needs_human"; UNKNOWN_WORD = "unknown_word"; BAD_PACKET = "bad_packet"; IS = "is"
 
 def gate(eta, identity, human):
     # eta is passed for gate-policy compatibility.
@@ -130,11 +136,73 @@ def gate(eta, identity, human):
     if human: return Write.HUMAN
     return Write.DELTA
 
+def _closed(obj, allowed):
+    if not isinstance(obj, dict):
+        return None
+    if set(obj) - allowed:
+        return None
+    return obj
+
+def parse_packet(raw):
+    """LLM -> index spec. JSON object or dict. No free-text parse."""
+    if isinstance(raw, str):
+        raw = raw.strip()
+        if raw.startswith("```"):
+            raw = raw.strip("`")
+            if raw.lower().startswith("json"):
+                raw = raw[4:]
+            raw = raw.strip()
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+    pkt = _closed(raw, PACKET_KEYS)
+    if pkt is None:
+        return None
+    if "gamma" in pkt:
+        g = _closed(pkt["gamma"], GAMMA_KEYS)
+        if g is None:
+            return None
+        pkt = {**pkt, "gamma": g}
+    if "delta" in pkt:
+        if not isinstance(pkt["delta"], list):
+            return None
+        rows = []
+        for row in pkt["delta"]:
+            d = _closed(row, DELTA_KEYS)
+            if d is None or "field" not in d or "new_value" not in d:
+                return None
+            rows.append(d)
+        pkt = {**pkt, "delta": rows}
+    if "is" in pkt:
+        if not isinstance(pkt["is"], list):
+            return None
+        rows = []
+        for row in pkt["is"]:
+            item = _closed(row, IS_KEYS)
+            if item is None or "field" not in item or "value" not in item:
+                return None
+            rows.append(item)
+        pkt = {**pkt, "is": rows}
+    if "gamma" not in pkt:
+        return None
+    return pkt
+
+def packet_gamma(pkt) -> Gamma:
+    g = pkt.get("gamma") or {}
+    return Gamma(
+        time_label=str(g.get("time_label", "")),
+        project=str(g.get("project", "")),
+        topic=str(g.get("topic", "")),
+    )
+
 class Capsule:
     def __init__(self, inner: Inner):
         self.inner = inner.seal()
         self._deltas = []
         self._pending = []
+        self._is = {}
+        self._is_pending = []
         self._index = defaultdict(list)
         self._adopted = set()
         self.eta = Eta()
@@ -173,8 +241,92 @@ class Capsule:
         self._index_put(address)
         self.last_write = Write.DELTA
         return d
+    def write_is(self, address, field, value, human=False, identity=1.0, grain="month"):
+        """Adopt into isolated IS. Does not append Δ."""
+        word = canon_word(field)
+        if word not in self.allowed_words():
+            self.last_write = Write.UNKNOWN_WORD
+            return None
+        decision = gate(self.eta, identity, human)
+        if decision == Write.NONE:
+            self.last_write = Write.NONE
+            return None
+        address = self._prepare_address(address, grain=grain)
+        line = f"{word}={value.strip()}"
+        if not value.strip():
+            self.last_write = Write.NONE
+            return None
+        self._index_put(address)
+        if decision == Write.HUMAN:
+            item = (address, line)
+            if item not in self._is_pending:
+                self._is_pending.append(item)
+            self.last_write = Write.HUMAN
+            return None
+        return self._adopt_is(address, line)
+    def _adopt_is(self, address, line):
+        key = address.key()
+        bag = list(self._is.get(key, []))
+        if line in bag:
+            bag.remove(line)
+        bag.append(line)
+        self._is[key] = bag[-IS_MAX:]
+        self.last_write = Write.IS
+        return line
+    def approve_is(self, index=-1):
+        if not self._is_pending:
+            return None
+        address, line = self._is_pending.pop(index)
+        return self._adopt_is(address, line)
+    def reject_is(self, index=-1):
+        if not self._is_pending:
+            return None
+        return self._is_pending.pop(index)
+    def ingest(self, raw, human=False, identity=1.0, grain="month"):
+        """Only LLM write entry. Closed packet to γ index / Δ index / isolated IS."""
+        pkt = parse_packet(raw)
+        if pkt is None:
+            self.last_write = Write.BAD_PACKET
+            return None
+        address = self._prepare_address(packet_gamma(pkt), grain=grain)
+        self._index_put(address)
+        out = {"gamma": address, "delta": [], "is": [], "write": Write.NONE}
+        for row in pkt.get("delta") or []:
+            d = self.write_delta(
+                address,
+                row["field"],
+                row["new_value"],
+                old_value=row.get("old_value"),
+                source_id=row.get("source_id", "llm"),
+                reason=row.get("reason", ""),
+                human=human,
+                identity=identity,
+                grain=grain,
+            )
+            if d is not None:
+                out["delta"].append(d)
+        for row in pkt.get("is") or []:
+            line = self.write_is(
+                address,
+                row["field"],
+                row["value"],
+                human=human,
+                identity=identity,
+                grain=grain,
+            )
+            if line is not None:
+                out["is"].append(line)
+        if out["is"]:
+            out["write"] = Write.IS
+        elif out["delta"]:
+            out["write"] = Write.DELTA
+        else:
+            out["write"] = self.last_write
+        return out
     def pending(self):
         return list(self._pending)
+    def pending_is(self):
+        return list(self._is_pending)
     def approve_pending(self, index=-1, keep_history=True):
         if not self._pending:
             return None
@@ -217,11 +369,15 @@ class Capsule:
                 out.append(g)
         return out
     def is_lines(self, filt, exact=True):
+        # isolated IS only. Δ latest is not copied here.
         lines = []
-        for d in self.latest_at(filt, exact=exact):
-            line = d.line()
-            if line not in lines:
-                lines.append(line)
+        for key, bag in self._is.items():
+            g = Gamma(**json.loads(key))
+            if not g.matches(filt, exact=exact):
+                continue
+            for line in bag:
+                if line not in lines:
+                    lines.append(line)
         return lines[-IS_MAX:]
     def render(self, user, filt, exact=True):
         inn = self.inner

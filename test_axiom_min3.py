@@ -153,6 +153,22 @@ class TestAxiomMin3(unittest.TestCase):
         text = self.cap.render("続けて", {"project": "AXIOM", "topic": "test"})
         self.assertIn("生成するな", text)
 
+    def test_exact_is_supplied_dimensions_only(self):
+        a = Gamma(time_label="2026-07", project="AXIOM", topic="Capsule")
+        b = Gamma(time_label="2026-08", project="AXIOM", topic="MAS")
+        self.cap.write_delta(a, "状態", "本筋")
+        self.cap.write_delta(b, "状態", "別件")
+        values = [d.new_value for _, d in self.cap.query_delta({"project": "AXIOM"}, exact=True)]
+        self.assertEqual(sorted(values), ["別件", "本筋"])
+        self.assertEqual(self.cap.is_lines({"project": "AXIOM", "topic": "Capsule"}, exact=True), ["状態=本筋"])
+        self.assertEqual(self.cap.is_lines({"project": "AXIO"}, exact=True), [])
+        leaked = self.cap.is_lines({"project": "AXIO"}, exact=False)
+        self.assertTrue(any("本筋" in x or "別件" in x for x in leaked))
+        text = self.cap.render("今どこ", {"project": "AXIOM", "topic": "Capsule"})
+        addr = text.split("[γ address]")[1].split("[IS]")[0]
+        self.assertIn("AXIOM / Capsule", addr)
+        self.assertNotIn("2026-07", addr)
+
     def test_high_eta_does_not_block_delta_write(self):
         self.cap.eta.step(tone=0.0, identity=0.0, values=0.0)
         self.assertTrue(self.cap.eta.high())

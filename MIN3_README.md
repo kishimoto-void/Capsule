@@ -13,3 +13,5 @@ python3 phase3_gamma_history.py
 ```
 
 latest は append 順。index は `project::topic` の候補絞り。正確な判定は `Gamma.matches`。
+
+`exact=True` は γ 3軸の全指定を要求しない。フィルタに書いた軸だけ完全一致し、書いていない軸はワイルドカードである。`{"project": "AXIOM"}` は同プロジェクトの全 topic に当たる。部分文字列の探索は `exact=False` に限る。

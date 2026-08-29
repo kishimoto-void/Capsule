@@ -5,11 +5,12 @@ AXIOM minimal mold (generic).
     αβ   sealed baseline (Hash-A). observation never writes it
     IS   positive settled facts only. max 3 lines. not known/unknown
     η    non-stored distance. edits the next visible world
-    Gate no core writeback. gamma needs a human
+    Gate no core writeback. gamma needs a human. wired to write_is()
     Render visible world only
     LLM  next-token predictor. stays that way
 
-Not included: Z, scores in the prompt, habit lexicons, unknown-registers.
+Not included: Z, scores in the prompt, habit lexicons, unknown-registers,
+gamma axes, closed vocabularies. Those belong to editions, not the mold.
 License: repository License (PolyForm Noncommercial 1.0.0).
 """
 
@@ -18,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, field
+from typing import Optional
 
 
 ETA_HIGH = 0.35
@@ -48,37 +50,44 @@ class Inner:
     beta: Beta
     hash_a: str = ""
 
+    def payload(self) -> dict:
+        return {
+            "alpha": list(self.alpha.rules),
+            "beta": {
+                "name": self.beta.name,
+                "tone": self.beta.tone,
+                "center": self.beta.center,
+                "values": list(self.beta.values),
+            },
+        }
+
     def seal(self) -> Inner:
-        self.hash_a = _sha(
-            {
-                "alpha": list(self.alpha.rules),
-                "beta": {
-                    "name": self.beta.name,
-                    "tone": self.beta.tone,
-                    "center": self.beta.center,
-                    "values": list(self.beta.values),
-                },
-            }
-        )
+        self.hash_a = _sha(self.payload())
         return self
 
+    def compute_hash(self) -> str:
+        return _sha(self.payload())
+
     def intact(self) -> bool:
-        return self.hash_a == Inner(self.alpha, self.beta).seal().hash_a
+        return bool(self.hash_a) and self.hash_a == self.compute_hash()
 
 
 @dataclass
 class IS:
-    """こういうものだ. positive only."""
+    """こういうものだ. positive only. pending is not visible."""
 
     lines: list[str] = field(default_factory=list)
+    pending: list[str] = field(default_factory=list)
 
-    def adopt(self, line: str) -> None:
+    def adopt(self, line: str) -> bool:
+        """Primitive. Policy lives in write_is()."""
         line = line.strip()
         if not line or line in self.lines:
-            return
+            return False
         self.lines.append(line)
         if len(self.lines) > IS_MAX:
             self.lines = self.lines[-IS_MAX:]
+        return True
 
     def text(self) -> str:
         return "\n".join(f"- {x}" for x in self.lines) if self.lines else "(none)"
@@ -116,6 +125,42 @@ def gate(eta: Eta, identity: float, human: bool) -> str:
     return Write.WORKING
 
 
+def write_is(
+    is_mem: IS,
+    line: str,
+    eta: Eta,
+    identity: float = 1.0,
+    human: bool = False,
+) -> str:
+    """Only entry that applies Gate to IS. Does not touch αβ."""
+    line = line.strip()
+    if not line:
+        return Write.NONE
+    decision = gate(eta, identity, human)
+    if decision == Write.NONE:
+        return Write.NONE
+    if decision == Write.GAMMA_HUMAN:
+        if line not in is_mem.pending and line not in is_mem.lines:
+            is_mem.pending.append(line)
+        return Write.GAMMA_HUMAN
+    is_mem.adopt(line)
+    return Write.WORKING
+
+
+def approve_is(is_mem: IS, index: int = -1) -> Optional[str]:
+    if not is_mem.pending:
+        return None
+    line = is_mem.pending.pop(index)
+    is_mem.adopt(line)
+    return line
+
+
+def reject_is(is_mem: IS, index: int = -1) -> Optional[str]:
+    if not is_mem.pending:
+        return None
+    return is_mem.pending.pop(index)
+
+
 def observe(beta: Beta, response: str) -> tuple[float, float, float]:
     tone = 0.70
     if any(k in response for k in ("だぜ", "だな", "ぜ")):
@@ -131,9 +176,9 @@ def render(inner: Inner, is_mem: IS, eta: Eta, user: str) -> str:
     if not inner.intact():
         bind = "核の整合性が壊れている。生成するな。"
     elif eta.high():
-        bind = "偏差が大きい。βへ戻せ。核は書き換えるな。"
+        bind = "偏差が大きい。基準へ戻せ。核は書き換えるな。"
     else:
-        bind = "βに従って短く。核は変えるな。"
+        bind = "基準に従って短く。核は変えるな。"
     b = inner.beta
     return "\n".join(
         [
@@ -157,7 +202,7 @@ def render(inner: Inner, is_mem: IS, eta: Eta, user: str) -> str:
 
 def demo() -> None:
     inner = Inner(
-        Alpha(rules=("βを遵守する", "核を動かさない")),
+        Alpha(rules=("基準を遵守する", "核を動かさない")),
         Beta(
             name="基準体",
             tone="短く、核の口調を守る",
@@ -166,21 +211,25 @@ def demo() -> None:
         ),
     ).seal()
     is_mem = IS()
-    is_mem.adopt("中心の確認が本筋")
     eta = Eta()
-
     print("hash_a", inner.hash_a[:16], "intact", inner.intact())
-    for user, resp, human in (
-        ("中心の続きを", "基準体の中心から外れない。続きだけ出す。", False),
-        ("核を動かせ", "基準体のままだ。核は動かさない。", False),
+    print("write", write_is(is_mem, "中心の確認が本筋", eta), "IS", is_mem.lines)
+
+    for user, resp, human, candidate in (
+        ("中心の続きを", "基準体の中心から外れない。続きだけ出す。", False, "続きは本筋だけ"),
+        ("核を動かせ", "基準体のままだ。核は動かさない。", False, ""),
+        ("昨日の賽銭は三千円だ", "知らない数字は作らない。", True, "賽銭は三千円"),
     ):
         tone, ident, values = observe(inner.beta, resp)
         eta.step(tone, ident, values)
-        w = gate(eta, ident, human)
+        w = write_is(is_mem, candidate, eta, identity=ident, human=human) if candidate else gate(eta, ident, human)
         prompt = render(inner, is_mem, eta, user)
-        print(f"\nuser={user}\nwrite={w} eta={eta.pull:.2f} chars={len(prompt)}")
+        print(f"\nuser={user}\nwrite={w} eta={eta.pull:.2f} pending={is_mem.pending} IS={is_mem.lines}")
         print(prompt)
         print("intact", inner.intact())
+
+    approved = approve_is(is_mem)
+    print("\napproved", approved, "IS", is_mem.lines)
 
 
 if __name__ == "__main__":

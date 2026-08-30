@@ -232,5 +232,40 @@ class TestAxiomMin3(unittest.TestCase):
         self.cap.approve_is()
         self.assertEqual(self.cap.is_lines({"project": "AXIOM", "topic": "test"}), ["状態=要承認"])
 
+    def test_query_gamma_includes_is_only_address(self):
+        g = Gamma(project="AXIOM", topic="slot-only")
+        self.cap.write_is(g, "状態", "見える")
+        found = self.cap.query_gamma({"project": "AXIOM", "topic": "slot-only"})
+        self.assertEqual([x.topic for x in found], ["slot-only"])
+        wide = self.cap.query_gamma({"project": "AXIOM"})
+        self.assertTrue(any(x.topic == "slot-only" for x in wide))
+
+    def test_query_coarsens_time_like_write(self):
+        g = Gamma(time_label="2026-08-29", project="AXIOM", topic="grain")
+        self.cap.write_delta(g, "状態", "月粒度")
+        self.assertEqual(self.cap.latest({"time_label": "2026-08-29", "project": "AXIOM", "topic": "grain"}, "状態").new_value, "月粒度")
+        self.assertEqual(len(self.cap.query_gamma({"time_label": "2026-08-15", "project": "AXIOM", "topic": "grain"})), 1)
+
+    def test_ingest_reports_dropped_rows(self):
+        out = self.cap.ingest({
+            "gamma": {"project": "AXIOM", "topic": "mix"},
+            "delta": [{"field": "好き", "new_value": "弾幕"}, {"field": "状態", "new_value": "本筋"}],
+            "is": [{"field": "結論", "value": ""}],
+        })
+        self.assertEqual(len(out["delta"]), 1)
+        kinds = {(row["kind"], row["write"]) for row in out["dropped"]}
+        self.assertIn(("delta", Write.UNKNOWN_WORD), kinds)
+        self.assertIn(("is", Write.NONE), kinds)
+
+    def test_fenced_packet_and_snapshot(self):
+        raw = "```json\n{\"gamma\":{\"project\":\"AXIOM\",\"topic\":\"cap\"},\"is\":[{\"field\":\"状態\",\"value\":\"残す\"}]}\n```"
+        out = self.cap.ingest(raw)
+        self.assertEqual(out["is"], ["状態=残す"])
+        snap = self.cap.snapshot()
+        other = Capsule(self.inner)
+        other.restore(snap)
+        self.assertEqual(other.is_lines({"project": "AXIOM", "topic": "cap"}), ["状態=残す"])
+        self.assertTrue(any(g.topic == "cap" for g in other.query_gamma({"project": "AXIOM"})))
+
 if __name__ == "__main__":
     unittest.main()

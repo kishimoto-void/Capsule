@@ -10,6 +10,8 @@ No new layer:
   - latest is append order. η does not decide writes
   - LLM writes only via closed packet {gamma, delta, is}
   - IS is isolated from Δ. write_delta never adopts IS
+  - query_gamma reads _index (IS-only addresses stay visible)
+  - query/render coarsen time_label with the same grain as write
 """
 from __future__ import annotations
 import hashlib, json, time
@@ -39,6 +41,13 @@ def coarse_time(label: str, grain: str = "month") -> str:
     if grain == "week" and len(s) >= 10:
         return s[:10]
     return s[:7] if len(s) >= 7 else s
+
+def normalize_filt(filt, grain="month"):
+    # write and query share this. day stored as month still matches "2026-08-15".
+    out = dict(filt or {})
+    if out.get("time_label"):
+        out["time_label"] = coarse_time(str(out["time_label"]), grain=grain)
+    return out
 
 def gamma_line(filt: dict) -> str:
     # shows supplied dimensions only. missing axes stay blank, not inferred.
@@ -98,7 +107,7 @@ class Gamma:
     def key(self):
         return json.dumps(asdict(self), ensure_ascii=False, sort_keys=True)
 
-GammaIndex = Gamma
+GammaIndex = Gamma  # alias. index row is the address itself.
 
 @dataclass(frozen=True)
 class Delta:
@@ -111,7 +120,7 @@ class Delta:
     def line(self):
         return f"{self.field}={self.new_value}" if self.old_value is None else f"{self.field}:{self.old_value}->{self.new_value}"
 
-DeltaIndex = Delta
+DeltaIndex = Delta  # alias. index row is the update itself.
 
 @dataclass
 class Eta:
@@ -143,15 +152,22 @@ def _closed(obj, allowed):
         return None
     return obj
 
+def _strip_fence(raw: str) -> str:
+    s = raw.strip()
+    if not s.startswith("```"):
+        return s
+    s = s[3:]
+    if s[:4].lower() == "json":
+        s = s[4:]
+    end = s.rfind("```")
+    if end >= 0:
+        s = s[:end]
+    return s.strip()
+
 def parse_packet(raw):
     """LLM -> index spec. JSON object or dict. No free-text parse."""
     if isinstance(raw, str):
-        raw = raw.strip()
-        if raw.startswith("```"):
-            raw = raw.strip("`")
-            if raw.lower().startswith("json"):
-                raw = raw[4:]
-            raw = raw.strip()
+        raw = _strip_fence(raw)
         try:
             raw = json.loads(raw)
         except json.JSONDecodeError:
@@ -244,6 +260,10 @@ class Capsule:
     def write_is(self, address, field, value, human=False, identity=1.0, grain="month"):
         """Adopt into isolated IS. Does not append Δ."""
         word = canon_word(field)
+        text = str(value).strip()
+        if not text:
+            self.last_write = Write.NONE
+            return None
         if word not in self.allowed_words():
             self.last_write = Write.UNKNOWN_WORD
             return None
@@ -252,10 +272,7 @@ class Capsule:
             self.last_write = Write.NONE
             return None
         address = self._prepare_address(address, grain=grain)
-        line = f"{word}={value.strip()}"
-        if not value.strip():
-            self.last_write = Write.NONE
-            return None
+        line = f"{word}={text}"
         self._index_put(address)
         if decision == Write.HUMAN:
             item = (address, line)
@@ -290,7 +307,7 @@ class Capsule:
             return None
         address = self._prepare_address(packet_gamma(pkt), grain=grain)
         self._index_put(address)
-        out = {"gamma": address, "delta": [], "is": [], "write": Write.NONE}
+        out = {"gamma": address, "delta": [], "is": [], "dropped": [], "write": Write.NONE}
         for row in pkt.get("delta") or []:
             d = self.write_delta(
                 address,
@@ -305,6 +322,8 @@ class Capsule:
             )
             if d is not None:
                 out["delta"].append(d)
+            else:
+                out["dropped"].append({"kind": "delta", "field": row.get("field"), "write": self.last_write})
         for row in pkt.get("is") or []:
             line = self.write_is(
                 address,
@@ -316,6 +335,8 @@ class Capsule:
             )
             if line is not None:
                 out["is"].append(line)
+            else:
+                out["dropped"].append({"kind": "is", "field": row.get("field"), "write": self.last_write})
         if out["is"]:
             out["write"] = Write.IS
         elif out["delta"]:
@@ -336,31 +357,41 @@ class Capsule:
         if not self._pending:
             return None
         return self._pending.pop(index)
-    def query_delta(self, filt, exact=True):
+    def _addresses(self):
+        # _index is the address set. IS-only γ lives here too.
+        seen = []
+        for bag in self._index.values():
+            for g in bag:
+                if g not in seen:
+                    seen.append(g)
+        return seen
+    def query_delta(self, filt, exact=True, grain="month"):
+        filt = normalize_filt(filt, grain=grain)
         return [(g, d) for g, d in self._deltas if g.matches(filt, exact=exact)]
-    def query_gamma(self, filt, exact=True):
+    def query_gamma(self, filt, exact=True, grain="month"):
+        filt = normalize_filt(filt, grain=grain)
         if "project" in filt and "topic" in filt and exact:
-            cand = self._index.get(f"{filt['project']}::{filt['topic']}", [])
+            cand = list(self._index.get(f"{filt['project']}::{filt['topic']}", []))
         else:
-            cand = [c for c, _ in self._deltas]
+            cand = self._addresses()
         out = []
         for g in cand:
             if g.matches(filt, exact=exact) and g not in out:
                 out.append(g)
         return out
-    def latest_at(self, filt, exact=True):
+    def latest_at(self, filt, exact=True, grain="month"):
         # latest = append order on _deltas, not max(timestamp).
         last = {}
-        for _, d in self.query_delta(filt, exact=exact):
+        for _, d in self.query_delta(filt, exact=exact, grain=grain):
             last[d.field] = d
         return list(last.values())
-    def latest(self, filt, word, exact=True):
+    def latest(self, filt, word, exact=True, grain="month"):
         word = canon_word(word)
-        found = [d for _, d in self.query_delta(filt, exact=exact) if d.field == word]
+        found = [d for _, d in self.query_delta(filt, exact=exact, grain=grain) if d.field == word]
         return found[-1] if found else None
-    def history(self, filt, word, exact=True):
+    def history(self, filt, word, exact=True, grain="month"):
         word = canon_word(word)
-        return [d for _, d in self.query_delta(filt, exact=exact) if d.field == word]
+        return [d for _, d in self.query_delta(filt, exact=exact, grain=grain) if d.field == word]
     def lookup(self, word):
         word = canon_word(word)
         out = []
@@ -368,8 +399,10 @@ class Capsule:
             if d.field == word and g not in out:
                 out.append(g)
         return out
-    def is_lines(self, filt, exact=True):
+    def is_lines(self, filt, exact=True, grain="month"):
         # isolated IS only. Δ latest is not copied here.
+        # per-address cap is _adopt_is. this last slice is the render window.
+        filt = normalize_filt(filt, grain=grain)
         lines = []
         for key, bag in self._is.items():
             g = Gamma(**json.loads(key))
@@ -379,7 +412,30 @@ class Capsule:
                 if line not in lines:
                     lines.append(line)
         return lines[-IS_MAX:]
-    def render(self, user, filt, exact=True):
+    def snapshot(self):
+        return {
+            "deltas": [{"gamma": asdict(g), "delta": asdict(d)} for g, d in self._deltas],
+            "is": dict(self._is),
+            "pending": [{"gamma": asdict(g), "delta": asdict(d)} for g, d in self._pending],
+            "is_pending": [{"gamma": asdict(g), "line": line} for g, line in self._is_pending],
+            "adopted": sorted(self._adopted),
+        }
+    def restore(self, snap):
+        self._deltas = [(Gamma(**row["gamma"]), Delta(**row["delta"])) for row in snap.get("deltas") or []]
+        self._is = dict(snap.get("is") or {})
+        self._pending = [(Gamma(**row["gamma"]), Delta(**row["delta"])) for row in snap.get("pending") or []]
+        self._is_pending = [(Gamma(**row["gamma"]), row["line"]) for row in snap.get("is_pending") or []]
+        self._adopted = set(snap.get("adopted") or [])
+        self._index = defaultdict(list)
+        for g, _ in self._deltas:
+            self._index_put(g)
+        for key in self._is:
+            self._index_put(Gamma(**json.loads(key)))
+        for g, _ in self._pending + self._is_pending:
+            self._index_put(g)
+        return self
+    def render(self, user, filt, exact=True, grain="month"):
+        filt = normalize_filt(filt, grain=grain)
         inn = self.inner
         if not inn.intact():
             bind = "核の整合性が壊れている。生成するな。"

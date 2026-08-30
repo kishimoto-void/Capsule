@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """min3 単体検証。γ は time+project+topic。"""
 import unittest
-from axiom_min3 import Alpha, Beta, BetaFact, Capsule, Eta, Gamma, Inner, Write, gate, parse_packet
+from axiom_min3 import Alpha, Beta, BetaFact, Capsule, Eta, Gamma, Inner, Write, gate, make_test_capsule, parse_packet
 
 class TestAxiomMin3(unittest.TestCase):
     def setUp(self):
@@ -266,6 +266,17 @@ class TestAxiomMin3(unittest.TestCase):
         other.restore(snap)
         self.assertEqual(other.is_lines({"project": "AXIOM", "topic": "cap"}), ["状態=残す"])
         self.assertTrue(any(g.topic == "cap" for g in other.query_gamma({"project": "AXIOM"})))
+
+    def test_single_axis_index_and_pending_bind(self):
+        cap = make_test_capsule(facts=(BetaFact("K-1", "sys", "AXIOM"),))
+        cap.write_is(Gamma(project="AXIOM", topic="only-is"), "状態", "索引")
+        by_proj = cap.query_gamma({"project": "AXIOM"})
+        by_topic = cap.query_gamma({"topic": "only-is"})
+        self.assertTrue(any(g.topic == "only-is" for g in by_proj))
+        self.assertEqual([g.project for g in by_topic], ["AXIOM"])
+        cap.write_delta(Gamma(project="AXIOM", topic="only-is"), "結論", "待ち", human=True)
+        text = cap.render("続けて", {"project": "AXIOM", "topic": "only-is"})
+        self.assertIn("pending Δ=1 IS=0", text)
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""min3 単体検証。γ は time+project+topic。"""
+"""min3 単体検証。γ は time+project+topic。ローカル改良込み。"""
 import unittest
 from axiom_min3 import Alpha, Beta, BetaFact, Capsule, Eta, Gamma, Inner, Write, gate, make_test_capsule, parse_packet
 
@@ -277,6 +277,60 @@ class TestAxiomMin3(unittest.TestCase):
         cap.write_delta(Gamma(project="AXIOM", topic="only-is"), "結論", "待ち", human=True)
         text = cap.render("続けて", {"project": "AXIOM", "topic": "only-is"})
         self.assertIn("pending Δ=1 IS=0", text)
+
+    def test_matches_stringifies_filter_values(self):
+        g = Gamma(time_label="2026", project="AXIOM", topic="n")
+        self.assertTrue(g.matches({"time_label": 2026}, exact=True))
+        self.assertTrue(g.matches({"project": "AXIO"}, exact=False))
+
+    def test_restore_drops_broken_snapshot_rows(self):
+        cap = make_test_capsule()
+        cap.write_is(Gamma(project="AXIOM", topic="ok"), "状態", "残す")
+        snap = cap.snapshot()
+        snap["is"]["not-json"] = ["壊す"]
+        snap["is"]['{"project":"AXIOM","topic":"ok","memory":"x"}'] = ["余計"]
+        snap["deltas"] = [{"gamma": {"project": "AXIOM"}, "delta": {"field": "状態"}, "extra": 1}]
+        other = make_test_capsule()
+        other.restore(snap)
+        self.assertEqual(other.is_lines({"project": "AXIOM", "topic": "ok"}), ["状態=残す"])
+        self.assertEqual(other._deltas, [])
+
+    def test_ingest_reports_both_writes(self):
+        out = self.cap.ingest({
+            "gamma": {"project": "AXIOM", "topic": "both"},
+            "delta": [{"field": "状態", "new_value": "本筋"}],
+            "is": [{"field": "結論", "value": "隔離"}],
+        })
+        self.assertEqual(out["wrote"], {"delta": 1, "is": 1})
+        self.assertEqual(out["write"], Write.IS)
+
+    def test_empty_gamma_is_bad_packet(self):
+        self.assertIsNone(parse_packet({"gamma": {}}))
+        self.assertIsNone(self.cap.ingest({"gamma": {}}))
+        self.assertEqual(self.cap.last_write, Write.BAD_PACKET)
+        self.assertEqual(self.cap.query_gamma({}), [])
+
+    def test_failed_ingest_does_not_index(self):
+        self.cap.ingest({"gamma": {"project": "AXIOM", "topic": "ghost"}, "delta": [{"field": "好き", "new_value": "弾幕"}]})
+        self.assertEqual(self.cap.query_gamma({"topic": "ghost"}), [])
+        self.assertEqual(self.cap.last_write, Write.UNKNOWN_WORD)
+
+    def test_empty_rows_reset_write(self):
+        self.cap.write_is(self.g1, "状態", "先")
+        out = self.cap.ingest({"gamma": {"project": "AXIOM", "topic": "empty-rows"}})
+        self.assertEqual(out["wrote"], {"delta": 0, "is": 0})
+        self.assertEqual(out["write"], Write.NONE)
+        self.assertEqual(self.cap.last_write, Write.NONE)
+        self.assertEqual(self.cap.query_gamma({"topic": "empty-rows"}), [])
+
+    def test_wide_is_keeps_each_address(self):
+        self.cap.write_is(Gamma(project="AXIOM", topic="a"), "状態", "A")
+        self.cap.write_is(Gamma(project="AXIOM", topic="b"), "状態", "B")
+        self.cap.write_is(Gamma(project="AXIOM", topic="c"), "状態", "C")
+        self.cap.write_is(Gamma(project="AXIOM", topic="d"), "状態", "D")
+        wide = self.cap.is_lines({"project": "AXIOM"})
+        self.assertEqual(wide, ["状態=A", "状態=B", "状態=C", "状態=D"])
+        self.assertEqual(self.cap.is_lines({"project": "AXIOM", "topic": "a"}), ["状態=A"])
 
 if __name__ == "__main__":
     unittest.main()

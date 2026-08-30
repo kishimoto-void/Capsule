@@ -14,6 +14,9 @@ No new layer:
   - query/render coarsen time_label with the same grain as write
   - identity default 1.0. caller must pass it to trip the 0.20 gate
   - Delta.timestamp is audit only. latest stays append order
+  - γ packet needs at least one axis. empty address is not an address
+  - index grows only after a committed Δ or adopted IS
+  - IS_MAX caps each address. render does not recut across addresses
 """
 from __future__ import annotations
 import hashlib, json, time
@@ -29,6 +32,7 @@ PACKET_KEYS = frozenset({"gamma", "delta", "is"})
 GAMMA_KEYS = frozenset({"time_label", "project", "topic"})
 DELTA_KEYS = frozenset({"field", "new_value", "old_value", "source_id", "reason"})
 IS_KEYS = frozenset({"field", "value"})
+SNAP_DELTA_KEYS = frozenset({"field", "old_value", "new_value", "timestamp", "source_id", "reason"})
 
 def _sha(obj):
     raw = json.dumps(obj, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -39,6 +43,7 @@ def canon_word(field: str) -> str:
     return WORD_ALIAS.get(f, WORD_ALIAS.get(f.lower(), f))
 
 def coarse_time(label: str, grain: str = "month") -> str:
+    # footnote: grain="week" is YYYY-MM-DD prefix, not ISO week number.
     s = label.strip().replace("/", "-")
     if grain == "week" and len(s) >= 10:
         return s[:10]
@@ -100,9 +105,10 @@ class Gamma:
         # exact does not mean "all three axes must be present".
         for k, v in filt.items():
             if not hasattr(self, k): return False
-            val = getattr(self, k)
-            if exact and val != v: return False
-            if not exact and v.lower() not in val.lower(): return False
+            val = str(getattr(self, k))
+            needle = str(v)
+            if exact and val != needle: return False
+            if not exact and needle.lower() not in val.lower(): return False
         return True
     def label(self):
         return " / ".join(p for p in (self.time_label, self.project, self.topic) if p) or "(unscoped)"
@@ -204,7 +210,38 @@ def parse_packet(raw):
         pkt = {**pkt, "is": rows}
     if "gamma" not in pkt:
         return None
+    g = pkt["gamma"]
+    # footnote: an address needs a where. empty γ is not indexed.
+    if not any(str(g.get(k, "")).strip() for k in ("time_label", "project", "topic")):
+        return None
     return pkt
+
+def _load_gamma(obj) -> Optional[Gamma]:
+    g = _closed(obj, GAMMA_KEYS)
+    if g is None:
+        return None
+    return Gamma(
+        time_label=str(g.get("time_label", "")),
+        project=str(g.get("project", "")),
+        topic=str(g.get("topic", "")),
+    )
+
+def _load_delta(obj) -> Optional[Delta]:
+    d = _closed(obj, SNAP_DELTA_KEYS)
+    if d is None or "field" not in d or "new_value" not in d:
+        return None
+    try:
+        ts = float(d.get("timestamp") or 0.0)
+    except (TypeError, ValueError):
+        return None
+    return Delta(
+        field=canon_word(str(d["field"])),
+        old_value=None if d.get("old_value") is None else str(d["old_value"]),
+        new_value=str(d["new_value"]),
+        timestamp=ts,
+        source_id=str(d.get("source_id", "")),
+        reason=str(d.get("reason", "")),
+    )
 
 def packet_gamma(pkt) -> Gamma:
     g = pkt.get("gamma") or {}
@@ -283,7 +320,6 @@ class Capsule:
             return None
         address = self._prepare_address(address, grain=grain)
         line = f"{word}={text}"
-        self._index_put(address)
         if decision == Write.HUMAN:
             item = (address, line)
             if item not in self._is_pending:
@@ -298,6 +334,7 @@ class Capsule:
             bag.remove(line)
         bag.append(line)
         self._is[key] = bag[-IS_MAX:]
+        self._index_put(address)
         self.last_write = Write.IS
         return line
     def approve_is(self, index=-1):
@@ -316,7 +353,6 @@ class Capsule:
             self.last_write = Write.BAD_PACKET
             return None
         address = self._prepare_address(packet_gamma(pkt), grain=grain)
-        self._index_put(address)
         out = {"gamma": address, "delta": [], "is": [], "dropped": [], "write": Write.NONE}
         for row in pkt.get("delta") or []:
             d = self.write_delta(
@@ -347,12 +383,16 @@ class Capsule:
                 out["is"].append(line)
             else:
                 out["dropped"].append({"kind": "is", "field": row.get("field"), "write": self.last_write})
+        out["wrote"] = {"delta": len(out["delta"]), "is": len(out["is"])}
         if out["is"]:
             out["write"] = Write.IS
         elif out["delta"]:
             out["write"] = Write.DELTA
-        else:
+        elif out["dropped"]:
             out["write"] = self.last_write
+        else:
+            self.last_write = Write.NONE
+            out["write"] = Write.NONE
         return out
     def pending(self):
         return list(self._pending)
@@ -415,7 +455,7 @@ class Capsule:
         return out
     def is_lines(self, filt, exact=True, grain="month"):
         # isolated IS only. Δ latest is not copied here.
-        # per-address cap is _adopt_is. this last slice is the render window.
+        # footnote: IS_MAX lives in _adopt_is. wide filters keep every matching address.
         filt = normalize_filt(filt, grain=grain)
         lines = []
         for key, bag in self._is.items():
@@ -425,7 +465,7 @@ class Capsule:
             for line in bag:
                 if line not in lines:
                     lines.append(line)
-        return lines[-IS_MAX:]
+        return lines
     def snapshot(self):
         return {
             "deltas": [{"gamma": asdict(g), "delta": asdict(d)} for g, d in self._deltas],
@@ -435,11 +475,54 @@ class Capsule:
             "adopted": sorted(self._adopted),
         }
     def restore(self, snap):
-        self._deltas = [(Gamma(**row["gamma"]), Delta(**row["delta"])) for row in snap.get("deltas") or []]
-        self._is = dict(snap.get("is") or {})
-        self._pending = [(Gamma(**row["gamma"]), Delta(**row["delta"])) for row in snap.get("pending") or []]
-        self._is_pending = [(Gamma(**row["gamma"]), row["line"]) for row in snap.get("is_pending") or []]
-        self._adopted = set(snap.get("adopted") or [])
+        # snapshot is internal. extra keys and broken rows are dropped, not trusted.
+        if not isinstance(snap, dict):
+            return self
+        deltas = []
+        for row in snap.get("deltas") or []:
+            if not isinstance(row, dict):
+                continue
+            g, d = _load_gamma(row.get("gamma")), _load_delta(row.get("delta"))
+            if g is not None and d is not None:
+                deltas.append((g, d))
+        pending = []
+        for row in snap.get("pending") or []:
+            if not isinstance(row, dict):
+                continue
+            g, d = _load_gamma(row.get("gamma")), _load_delta(row.get("delta"))
+            if g is not None and d is not None:
+                pending.append((g, d))
+        is_store = {}
+        raw_is = snap.get("is") or {}
+        if isinstance(raw_is, dict):
+            for key, bag in raw_is.items():
+                try:
+                    parsed = json.loads(key) if isinstance(key, str) else None
+                except (json.JSONDecodeError, TypeError):
+                    parsed = None
+                g = _load_gamma(parsed)
+                if g is None or not isinstance(bag, list):
+                    continue
+                lines = [x for x in bag if isinstance(x, str) and x]
+                if lines:
+                    is_store[g.key()] = lines[-IS_MAX:]
+        is_pending = []
+        for row in snap.get("is_pending") or []:
+            if not isinstance(row, dict):
+                continue
+            g = _load_gamma(row.get("gamma"))
+            line = row.get("line")
+            if g is not None and isinstance(line, str) and line:
+                is_pending.append((g, line))
+        adopted = set()
+        for w in snap.get("adopted") or []:
+            if isinstance(w, str) and w:
+                adopted.add(canon_word(w))
+        self._deltas = deltas
+        self._pending = pending
+        self._is = is_store
+        self._is_pending = is_pending
+        self._adopted = adopted
         self._index = defaultdict(list)
         self._by_project = defaultdict(list)
         self._by_topic = defaultdict(list)

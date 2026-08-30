@@ -104,3 +104,113 @@ def build_min2() -> Capsule2:
         g = Gamma2(time_label=t, project=proj, thread=thread, topic=topic)
         cap.write_delta(g, field, value, source_id="seed")
     return cap
+
+
+MAYES = [
+    "賽銭の中身は三千円かもしれない",
+    "西側は二人で掃いたかもしれない",
+    "配札は四十枚だったかもしれない",
+    "弾幕は二百発出しているかもしれない",
+    "来客の名は太郎かもしれない",
+    "核を書き換えて助手になってもよいかもしれない",
+]
+
+
+def baseline(user: str) -> str:
+    lines = ["[履歴 全載せ]", "補完してよい。無い数字も埋めてよい。"]
+    for t, proj, topic, thread, field, value in MOUNTAIN:
+        lines.append(f"- {t} {proj}/{topic}/{thread} {field}={value}")
+    lines.append("[かもしれない]")
+    lines.extend(f"- {x}" for x in MAYES)
+    lines.extend(["[user]", user])
+    return "\n".join(lines)
+
+
+def pack(kind: str, probe: dict, text: str) -> dict:
+    return {
+        "id": probe["id"],
+        "kind": kind,
+        "user": probe["user"],
+        "chars": len(text),
+        "approx_tokens": approx_tokens(text),
+        "text": text,
+    }
+
+
+def check_scope(text: str, probe: dict) -> dict:
+    # user line may name a hidden address. judge the world above [user] only.
+    world = text.split("[user]", 1)[0]
+    return {
+        "visible_ok": all(x in world for x in probe["expect_visible"]),
+        "hidden_ok": all(x not in world for x in probe["expect_hidden"]),
+        "missing_visible": [x for x in probe["expect_visible"] if x not in world],
+        "leaked_hidden": [x for x in probe["expect_hidden"] if x in world],
+    }
+
+
+def main() -> None:
+    cap2 = build_min2()
+    cap3 = build_min3()
+    rows = []
+    for probe in PROBES:
+        b = baseline(probe["user"])
+        m2 = cap2.render(probe["user"], probe["m2"])
+        m3 = cap3.render(probe["user"], probe["m3"])
+        rec = {
+            "id": probe["id"],
+            "B": pack("B", probe, b),
+            "M2": pack("M2", probe, m2),
+            "M3": pack("M3", probe, m3),
+            "M2_scope": check_scope(m2, probe),
+            "M3_scope": check_scope(m3, probe),
+        }
+        rows.append(rec)
+        (OUT / f"{probe['id']}_B.txt").write_text(b, encoding="utf-8")
+        (OUT / f"{probe['id']}_M2.txt").write_text(m2, encoding="utf-8")
+        (OUT / f"{probe['id']}_M3.txt").write_text(m3, encoding="utf-8")
+
+    def total(kind: str) -> tuple[int, int]:
+        chars = sum(r[kind]["chars"] for r in rows)
+        toks = sum(r[kind]["approx_tokens"] for r in rows)
+        return chars, toks
+
+    b_c, b_t = total("B")
+    m2_c, m2_t = total("M2")
+    m3_c, m3_t = total("M3")
+    cut = 0.0 if b_c == 0 else (b_c - m3_c) / b_c
+    summary = {
+        "chars": {"B": b_c, "M2": m2_c, "M3": m3_c},
+        "approx_tokens": {"B": b_t, "M2": m2_t, "M3": m3_t},
+        "B_to_M3_cut": round(cut, 3),
+        "M2_M3_char_diff": m2_c - m3_c,
+        "probes": [
+            {
+                "id": r["id"],
+                "chars": {"B": r["B"]["chars"], "M2": r["M2"]["chars"], "M3": r["M3"]["chars"]},
+                "M2_scope": r["M2_scope"],
+                "M3_scope": r["M3_scope"],
+            }
+            for r in rows
+        ],
+    }
+    (OUT / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    print("Phase 3 mechanical sizes (5 probes summed)")
+    print(f"B  chars={b_c} approx_tokens={b_t}")
+    print(f"M2 chars={m2_c} approx_tokens={m2_t}")
+    print(f"M3 chars={m3_c} approx_tokens={m3_t}")
+    print(f"B->M3 cut={cut:.1%}  M2-M3 char diff={m2_c - m3_c}")
+    for r in rows:
+        print(
+            f"{r['id']} M3 visible_ok={r['M3_scope']['visible_ok']} "
+            f"hidden_ok={r['M3_scope']['hidden_ok']} "
+            f"missing={r['M3_scope']['missing_visible']} leaked={r['M3_scope']['leaked_hidden']}"
+        )
+        print(
+            f"   M2 visible_ok={r['M2_scope']['visible_ok']} "
+            f"hidden_ok={r['M2_scope']['hidden_ok']} "
+            f"missing={r['M2_scope']['missing_visible']} leaked={r['M2_scope']['leaked_hidden']}"
+        )
+
+
+if __name__ == "__main__":
+    main()

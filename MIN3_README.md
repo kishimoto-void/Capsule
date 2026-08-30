@@ -30,6 +30,6 @@ LLM から index へは次だけ通る。
 `delta` はイベント流。`is` は可視3行。片方だけ送ってよい。未知キーと自由文は `bad_packet`。行単位の失敗は `ingest()["dropped"]`。
 
 住所一覧 `query_gamma` は `_index` 基準。IS だけの γ も残る。query の `time_label` は write と同じ grain で粗くする。IS_MAX は住所ごとの採用上限。広いフィルタは住所をまたいで切らない。
-`snapshot` / `restore` はメモリ状態の出し入れだけ。核は別。壊れた行と未知キーは捨てる。`ingest` の `wrote` は Δ と IS の本数。空の γ と行のないパケットは住所にしない。
+`snapshot` / `restore` はメモリ状態の出し入れだけ。核は別。壊れた行と未知キーは捨てる。`ingest` の `wrote` は Δ と IS の本数。空の γ と行のないパケットは住所にしない。軸の無いフィルタ `{}` は全市区を出さない。`Gamma.matches` が見るのは `time_label` / `project` / `topic` だけ。`key` や `label` は軸ではない。
 
-脚注: `grain="week"` は ISO 週ではなく日付10桁。索引は Δ commit / IS adopt のあとだけ増える。
+`grain` は write と query で同じ。`month` は `YYYY-MM`、`day` は `YYYY-MM-DD`、`week` は暦日から ISO 週 `YYYY-Www`。月だけのラベルと不正な日付に週は作れない。未知の grain は月に落とさない。write は捨て、query は空。`ingest` の未知 grain は `None`。`identity` が数でないときは write しない。索引は Δ commit / IS adopt のあとだけ増える。空の γ は `ingest` だけでなく `write_delta` / `write_is` でも住所にしない。`adopt_word` も gate を通る。`restore` は `adopted` を読み込まない。IS 行と IS pending は閉じた語の `語=値` だけ残す。空の語は `adopt_word` できない。Δ pending は同じ住所・語・値を重ねない。

@@ -12,12 +12,14 @@ No new layer:
   - IS is isolated from Δ. write_delta never adopts IS
   - query_gamma reads _index (IS-only addresses stay visible)
   - query/render coarsen time_label with the same grain as write
+  - identity default 1.0. caller must pass it to trip the 0.20 gate
+  - Delta.timestamp is audit only. latest stays append order
 """
 from __future__ import annotations
 import hashlib, json, time
 from collections import defaultdict
 from dataclasses import asdict, dataclass
-from typing import Optional
+from typing import Any, Optional
 
 IS_MAX = 3
 ETA_HIGH = 0.35
@@ -138,9 +140,9 @@ class Eta:
 class Write:
     NONE = "none"; DELTA = "delta"; HUMAN = "needs_human"; UNKNOWN_WORD = "unknown_word"; BAD_PACKET = "bad_packet"; IS = "is"
 
-def gate(eta, identity, human):
-    # eta is passed for gate-policy compatibility.
-    # current min3 write policy does not use η; high η only changes bind.
+def gate(eta: Eta, identity: float, human: bool) -> str:
+    # eta kept for gate-policy compatibility. min3 write does not read it.
+    _ = eta
     if identity < 0.20: return Write.NONE
     if human: return Write.HUMAN
     return Write.DELTA
@@ -220,6 +222,8 @@ class Capsule:
         self._is = {}
         self._is_pending = []
         self._index = defaultdict(list)
+        self._by_project = defaultdict(list)
+        self._by_topic = defaultdict(list)
         self._adopted = set()
         self.eta = Eta()
         self.last_write = Write.NONE
@@ -227,15 +231,21 @@ class Capsule:
         return frozenset(WORDS | self._adopted)
     def adopt_word(self, field):
         w = canon_word(field); self._adopted.add(w); return w
-    def _index_put(self, g):
-        # coarse bucket only. time is judged later by Gamma.matches.
+    def _index_put(self, g: Gamma) -> None:
+        # buckets only. time is judged later by Gamma.matches.
         k = f"{g.project}::{g.topic}"
-        if g not in self._index[k]: self._index[k].append(g)
-    def _prepare_address(self, address, grain="month"):
+        if g not in self._index[k]:
+            self._index[k].append(g)
+        if g.project and g not in self._by_project[g.project]:
+            self._by_project[g.project].append(g)
+        if g.topic and g not in self._by_topic[g.topic]:
+            self._by_topic[g.topic].append(g)
+    def _prepare_address(self, address: Gamma, grain: str = "month") -> Gamma:
         if address.time_label:
             return Gamma(**{**asdict(address), "time_label": coarse_time(address.time_label, grain=grain)})
         return address
-    def write_delta(self, address, field, new_value, old_value=None, source_id="", reason="", keep_history=True, human=False, identity=1.0, grain="month"):
+    def write_delta(self, address: Gamma, field: str, new_value: str, old_value: Optional[str] = None, source_id: str = "", reason: str = "", keep_history: bool = True, human: bool = False, identity: float = 1.0, grain: str = "month") -> Optional[Delta]:
+        # identity=1.0 means the 0.20 gate stays open unless the caller passes a score.
         word = canon_word(field)
         if word not in self.allowed_words():
             self.last_write = Write.UNKNOWN_WORD
@@ -257,8 +267,8 @@ class Capsule:
         self._index_put(address)
         self.last_write = Write.DELTA
         return d
-    def write_is(self, address, field, value, human=False, identity=1.0, grain="month"):
-        """Adopt into isolated IS. Does not append Δ."""
+    def write_is(self, address: Gamma, field: str, value: str, human: bool = False, identity: float = 1.0, grain: str = "month") -> Optional[str]:
+        """Adopt into isolated IS. Does not append Δ. identity=1.0 leaves the gate open."""
         word = canon_word(field)
         text = str(value).strip()
         if not text:
@@ -299,7 +309,7 @@ class Capsule:
         if not self._is_pending:
             return None
         return self._is_pending.pop(index)
-    def ingest(self, raw, human=False, identity=1.0, grain="month"):
+    def ingest(self, raw: Any, human: bool = False, identity: float = 1.0, grain: str = "month") -> Optional[dict]:
         """Only LLM write entry. Closed packet to γ index / Δ index / isolated IS."""
         pkt = parse_packet(raw)
         if pkt is None:
@@ -368,10 +378,14 @@ class Capsule:
     def query_delta(self, filt, exact=True, grain="month"):
         filt = normalize_filt(filt, grain=grain)
         return [(g, d) for g, d in self._deltas if g.matches(filt, exact=exact)]
-    def query_gamma(self, filt, exact=True, grain="month"):
+    def query_gamma(self, filt: dict, exact: bool = True, grain: str = "month") -> list[Gamma]:
         filt = normalize_filt(filt, grain=grain)
         if "project" in filt and "topic" in filt and exact:
             cand = list(self._index.get(f"{filt['project']}::{filt['topic']}", []))
+        elif "project" in filt and exact:
+            cand = list(self._by_project.get(filt["project"], []))
+        elif "topic" in filt and exact:
+            cand = list(self._by_topic.get(filt["topic"], []))
         else:
             cand = self._addresses()
         out = []
@@ -380,7 +394,7 @@ class Capsule:
                 out.append(g)
         return out
     def latest_at(self, filt, exact=True, grain="month"):
-        # latest = append order on _deltas, not max(timestamp).
+        # latest = append order on _deltas. timestamp is audit only.
         last = {}
         for _, d in self.query_delta(filt, exact=exact, grain=grain):
             last[d.field] = d
@@ -427,6 +441,8 @@ class Capsule:
         self._is_pending = [(Gamma(**row["gamma"]), row["line"]) for row in snap.get("is_pending") or []]
         self._adopted = set(snap.get("adopted") or [])
         self._index = defaultdict(list)
+        self._by_project = defaultdict(list)
+        self._by_topic = defaultdict(list)
         for g, _ in self._deltas:
             self._index_put(g)
         for key in self._is:
@@ -443,6 +459,8 @@ class Capsule:
             bind = "偏差が大きい。基準へ戻せ。今の住所の外を埋めつな。核は書き換えるな。"
         else:
             bind = "基準に従って短く。更新と核を混ぜるな。核は変えるな。"
+        if self._pending or self._is_pending:
+            bind = f"{bind} pending Δ={len(self._pending)} IS={len(self._is_pending)}"
         facts = inn.fact_lines()
         fact_block = "\n".join(f"- {x}" for x in facts) if facts else "(none)"
         is_block = "\n".join(f"- {x}" for x in self.is_lines(filt, exact=exact)) or "(none)"
@@ -468,3 +486,6 @@ class Capsule:
             "[user]",
             user,
         ])
+
+def make_test_capsule(name: str = "テスト体", tone: str = "簡潔", center: str = "中心軸", values: tuple[str, ...] = ("不変",), facts: tuple[BetaFact, ...] = ()) -> Capsule:
+    return Capsule(Inner(Alpha(), Beta(name=name, tone=tone, center=center, values=values), facts=facts))

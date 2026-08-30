@@ -43,7 +43,7 @@ python3 phase3_gamma_history.py
 | `axiom_min.py` | 金型。触らない |
 | `axiom_min2.py` | 7軸γの保存版 |
 | `axiom_min3.py` | 作業線。γ = time + project + topic |
-| `test_axiom_min3.py` | 単体 8/8 |
+| `test_axiom_min3.py` | 単体 47/47 |
 | `phase3_gamma_history.py` | 同一 Δ 山の B / M2 / M3 文字数比較 |
 
 ---

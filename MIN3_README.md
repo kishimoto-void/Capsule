@@ -27,4 +27,7 @@ LLM から index へは次だけ通る。
 }
 ```
 
-`delta` はイベント流。`is` は可視3行。片方だけ送ってよい。未知キーと自由文は `bad_packet`。
+`delta` はイベント流。`is` は可視3行。片方だけ送ってよい。未知キーと自由文は `bad_packet`。行単位の失敗は `ingest()["dropped"]`。
+
+住所一覧 `query_gamma` は `_index` 基準。IS だけの γ も残る。query の `time_label` は write と同じ grain で粗くする。IS_MAX は住所ごとの採用上限であり、render の窓でもある。
+`snapshot` / `restore` はメモリ状態の出し入れだけ。核は別。

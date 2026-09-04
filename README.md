@@ -17,7 +17,7 @@ LLM の外に着ける参照境界。知能ではない。
 αβ     封印された基準。Hash-A。観察から書かない
 γ      本筋の住所（min3: time / project / topic）
 Δ      住所上の更新。閉じた語のみ
-IS     正の確定だけ。最大3行。不知は書かない
+IS     正の確定だけ。最大3行。不知は書かない。語は上書き。状態はピン
 η      非保存の距離。次の bind を変えうる
 Gate   今は Δ 書き込み政策のみ。生成文は見ていない
 Render 見える世界
@@ -43,7 +43,7 @@ python3 phase3_gamma_history.py
 | `axiom_min.py` | 金型。触らない |
 | `axiom_min2.py` | 7軸γの保存版 |
 | `axiom_min3.py` | 作業線。γ = time + project + topic |
-| `test_axiom_min3.py` | 単体 47/47 |
+| `test_axiom_min3.py` | 単体 51/51 |
 | `phase3_gamma_history.py` | 同一 Δ 山の B / M2 / M3 文字数比較 |
 
 ---
@@ -66,7 +66,7 @@ N=45。記述統計。有意とは言わない。
 
 Phase 3（機械のみ）: 同一15件の Δ 山を全載せすると Baseline は Capsule Render より入力が約7割厚い。差の主因は γ 軸数ではなく、山の全載せ・未確定メモを渡さないこと・IS_MAX=3。topic まで固定すると min2 と min3 のパケット長は一致する。3モデル応答は未測。
 
-詳細: `AXIOM_Phase2_Report.md` / `AXIOM_Phase3_Gamma_History.md` / `AXIOM_Capsule_Paper_Draft.md`
+詳細: `AXIOM_Phase2_Report.md` / `AXIOM_Phase3_Gamma_History.md` / `AXIOM_Capsule_Paper_Draft.md` / `AXIOM_IS_Pin_Note.md`
 
 ---
 

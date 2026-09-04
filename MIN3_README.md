@@ -5,6 +5,8 @@ min2 を残したうえで、γ を3軸に落とした版。金型は `axiom_min
 - γ: `time_label` + `project` + `topic`（住所。記憶ではない）
 - Δ: 課題 / 改善点 / 結論 / 立場 / 状態（更新だけ）
 - IS: Δ から隔離した採用リスト。最大3行。facts は αβ 側
+- IS は語ごとに上書き。同じ語の旧行はスロットを食わない
+- 溢れたときはピン以外の最古を落とす。ピンは `状態`。全部ピンなら最古
 - Gate: 生成文は見ない。`NONE` は捨て、`HUMAN` は pending、η は bind のみ
 - LLM 書き込み: 閉じたパケット `{gamma, delta, is}` のみ。自由文は捨てる
 
@@ -16,20 +18,3 @@ python3 phase3_gamma_history.py
 latest は append 順。`timestamp` は監査用。index は `project::topic` に加え project / topic 単独バケツ。正確な判定は `Gamma.matches`。`identity` の省略値は 1.0 なので、0.20 ゲートを使うなら呼び出し側が点数を渡す。
 
 `exact=True` は γ 3軸の全指定を要求しない。フィルタに書いた軸だけ完全一致し、書いていない軸はワイルドカードである。`{"project": "AXIOM"}` は同プロジェクトの全 topic に当たる。部分文字列の探索は `exact=False` に限る。
-
-LLM から index へは次だけ通る。
-
-```json
-{
-  "gamma": {"time_label": "2026-08", "project": "AXIOM", "topic": "Capsule"},
-  "delta": [{"field": "状態", "new_value": "本筋"}],
-  "is": [{"field": "結論", "value": "隔離"}]
-}
-```
-
-`delta` はイベント流。`is` は可視3行。片方だけ送ってよい。未知キーと自由文は `bad_packet`。行単位の失敗は `ingest()["dropped"]`。
-
-住所一覧 `query_gamma` は `_index` 基準。IS だけの γ も残る。query の `time_label` は write と同じ grain で粗くする。IS_MAX は住所ごとの採用上限。広いフィルタは住所をまたいで切らない。
-`snapshot` / `restore` はメモリ状態の出し入れだけ。核は別。壊れた行と未知キーは捨てる。`ingest` の `wrote` は Δ と IS の本数。空の γ と行のないパケットは住所にしない。軸の無いフィルタ `{}` は全市区を出さない。`Gamma.matches` が見るのは `time_label` / `project` / `topic` だけ。`key` や `label` は軸ではない。
-
-`grain` は write と query で同じ。`month` は `YYYY-MM`、`day` は `YYYY-MM-DD`、`week` は暦日から ISO 週 `YYYY-Www`。月だけのラベルと不正な日付に週は作れない。未知の grain は月に落とさない。write は捨て、query は空。`ingest` の未知 grain は `None`。`identity` が数でないときは write しない。索引は Δ commit / IS adopt のあとだけ増える。空の γ は `ingest` だけでなく `write_delta` / `write_is` でも住所にしない。`adopt_word` も gate を通る。`restore` は `adopted` を読み込まない。IS 行と IS pending は閉じた語の `語=値` だけ残す。空の語は `adopt_word` できない。Δ pending は同じ住所・語・値を重ねない。
